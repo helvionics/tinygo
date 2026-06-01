@@ -1,3 +1,11 @@
+# TinyGo: fork information
+
+This is a fork of TinyGo, including some features or bugfixes that TinyGo misses (all of the changes below available in the `dev-eiger` branch):
+ 1. The `de_rp2_flash`: Fixes the ROM Chip Select (CS) control and Flash memory access for RP2350 ROM code.
+ 2. The `de_automatic-stack-size-margin`: Fixes the stack size calculation for automatic stack allocation.
+ 3. The `de_better_hardfault_handler`: Improves the hardfault handler and stack reporting on Cortex-M.
+
+
 # TinyGo - Go compiler for small places
 
 [![Linux](https://github.com/tinygo-org/tinygo/actions/workflows/linux.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/linux.yml) [![macOS](https://github.com/tinygo-org/tinygo/actions/workflows/build-macos.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/build-macos.yml) [![Windows](https://github.com/tinygo-org/tinygo/actions/workflows/windows.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/windows.yml) [![Docker](https://github.com/tinygo-org/tinygo/actions/workflows/docker.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/docker.yml) [![Nix](https://github.com/tinygo-org/tinygo/actions/workflows/nix.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/nix.yml)
