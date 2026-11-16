@@ -170,7 +170,7 @@ All hooks are supplied by a board package through `//go:linkname <local> <target
 
 ### 3.1 Task Breakdown
 
-- [ ] **Task 1:** Implement `//go:weak` pragma, Go signature validation, order-independent LTO linking, and post-link internalization
+- [x] **Task 1:** Implement `//go:weak` pragma, Go signature validation, order-independent LTO linking, and post-link internalization
   - **Files:** `compiler/symbol.go`, `compiler/compiler.go`, `builder/build.go`, `compiler/testdata/pragma*.go`, `builder/link_test.go`, `builder/weak_test.go`
   - **Verification:** `go test ./compiler/... ./builder/...`
 - [ ] **Task 2:** Protect `interp` against pre-`initAll` hook mutations (with a regression test for a hook-assigned `machine.Serial`-style global) and add transitive `hwInit0` no-heap check
