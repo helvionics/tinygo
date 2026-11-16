@@ -271,3 +271,78 @@ exit:
 		t.Errorf("expected an error ending in %q, got %q", want, runErr.Error())
 	}
 }
+
+func TestInterpRunFuncBootHooks(t *testing.T) {
+	t.Parallel()
+
+	for _, hookName := range []string{"runtime.boardInit1", "runtime.socInit0"} {
+		t.Run(hookName, func(t *testing.T) {
+			ctx := llvm.NewContext()
+			defer ctx.Dispose()
+			mod := ctx.NewModule("board")
+			defer mod.Dispose()
+			mod.SetDataLayout("e-p:64:64-i64:64-n8:16:32:64")
+			builder := ctx.NewBuilder()
+			defer builder.Dispose()
+
+			i32Type := ctx.Int32Type()
+			ptrType := llvm.PointerType(ctx.Int8Type(), 0)
+			// RunFunc protects globals within the hook-defining package module.
+			// Cross-package mutations are deferred to whole-program interp.Run.
+			serialGlobal := llvm.AddGlobal(mod, ptrType, "board.serial")
+			serialGlobal.SetInitializer(llvm.ConstNull(ptrType))
+			roPtrGlobal := llvm.AddGlobal(mod, ptrType, "board.roPtr")
+			roPtrGlobal.SetInitializer(llvm.ConstNull(ptrType))
+			uartGlobal := llvm.AddGlobal(mod, i32Type, "board.uart")
+			uartGlobal.SetInitializer(llvm.ConstInt(i32Type, 42, false))
+			observedGlobal := llvm.AddGlobal(mod, ptrType, "board.observed")
+			observedGlobal.SetInitializer(llvm.ConstNull(ptrType))
+
+			hookType := llvm.FunctionType(ctx.VoidType(), []llvm.Type{ptrType}, false)
+			hookFn := llvm.AddFunction(mod, hookName, hookType)
+			builder.SetInsertPointAtEnd(ctx.AddBasicBlock(hookFn, "entry"))
+			builder.CreateStore(uartGlobal, serialGlobal)
+			roLoaded := builder.CreateLoad(ptrType, roPtrGlobal, "ro")
+			mmioStore := builder.CreateStore(llvm.ConstInt(i32Type, 1, false), roLoaded)
+			mmioStore.SetVolatile(true)
+			builder.CreateRetVoid()
+
+			initFn := llvm.AddFunction(mod, "board.init", hookType)
+			builder.SetInsertPointAtEnd(ctx.AddBasicBlock(initFn, "entry"))
+			builder.CreateStore(uartGlobal, roPtrGlobal)
+			loaded := builder.CreateLoad(ptrType, serialGlobal, "serial")
+			builder.CreateStore(loaded, observedGlobal)
+			builder.CreateRetVoid()
+
+			if err := RunFunc(
+				initFn,
+				time.Second,
+				DefaultMaxInterpBlockEntries,
+				false,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+				t.Fatal(err)
+			}
+
+			if roInit := roPtrGlobal.Initializer(); roInit != uartGlobal {
+				t.Errorf("board.roPtr initializer = %v, want @board.uart", roInit)
+			}
+			updatedInit := mod.NamedFunction("board.init")
+			if updatedInit.IsNil() {
+				t.Fatal("missing board.init")
+			}
+			ir := updatedInit.String()
+			if strings.Contains(ir, "@board.roPtr") {
+				t.Errorf("board.init did not fold store to read-only @board.roPtr:\n%s", ir)
+			}
+			if !strings.Contains(ir, "load ptr, ptr @board.serial") {
+				t.Errorf("board.init folded away runtime load of @board.serial:\n%s", ir)
+			}
+			if !strings.Contains(ir, "store ptr %serial, ptr @board.observed") {
+				t.Errorf("board.init lost runtime store to @board.observed:\n%s", ir)
+			}
+		})
+	}
+}

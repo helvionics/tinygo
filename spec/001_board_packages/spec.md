@@ -173,7 +173,7 @@ All hooks are supplied by a board package through `//go:linkname <local> <target
 - [x] **Task 1:** Implement `//go:weak` pragma, Go signature validation, order-independent LTO linking, and post-link internalization
   - **Files:** `compiler/symbol.go`, `compiler/compiler.go`, `builder/build.go`, `compiler/testdata/pragma*.go`, `builder/link_test.go`, `builder/weak_test.go`
   - **Verification:** `go test ./compiler/... ./builder/...`
-- [ ] **Task 2:** Protect `interp` against pre-`initAll` hook mutations (with a regression test for a hook-assigned `machine.Serial`-style global) and add transitive `hwInit0` no-heap check
+- [x] **Task 2:** Protect `interp` against pre-`initAll` hook mutations (with a regression test for a hook-assigned `machine.Serial`-style global) and add transitive `hwInit0` no-heap check
   - **Files:** `compiler/symbol.go`, `interp/interp.go`, `interp/interp_test.go`, `interp/testdata/...`, `transform/noheap_init.go`, `transform/noheap_init_test.go`, `transform/testdata/...`, `transform/optimizer.go`
   - **Verification:** `go test ./compiler/... ./interp/... ./transform/...`
 - [ ] **Task 3:** Resolve relative `linkerscript`, `extra-files`, and `.json` `inherits` paths for external `target.json`, add `"board-package"` (`TargetSpec.BoardPackage`) with automatic `boardpackage` build tag, and auto-import `BoardPackage` into the root package in `loader`

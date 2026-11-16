@@ -377,6 +377,78 @@ func hook() int32 { return 1 }
 	}
 }
 
+func TestNoHeapInitHooks(t *testing.T) {
+	t.Parallel()
+
+	mod, errs := compileSyntheticPkg(
+		t,
+		"example.com/board",
+		map[string]string{
+			"hooks.go": `package board
+
+import _ "unsafe"
+
+//go:linkname myBoardInit0 runtime.boardInit0
+func myBoardInit0() *int32 {
+	return new(int32)
+}
+
+//go:linkname mySocInit0 runtime.socInit0
+func mySocInit0() *int32 {
+	return new(int32)
+}
+
+//go:linkname myHwInit0 runtime.hwInit0
+func myHwInit0() *int32 {
+	return new(int32)
+}
+
+//go:linkname myBoardInit1 runtime.boardInit1
+func myBoardInit1() *int32 {
+	return new(int32)
+}
+
+//go:linkname mySocInit1 runtime.socInit1
+func mySocInit1() *int32 {
+	return new(int32)
+}
+
+//go:linkname myHwInit1 runtime.hwInit1
+func myHwInit1() *int32 {
+	return new(int32)
+}
+`,
+		},
+		false,
+	)
+	defer mod.Dispose()
+	if len(errs) != 0 {
+		t.Fatalf("unexpected compile errors: %v", errs)
+	}
+	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"runtime.hwInit0", "runtime.socInit0", "runtime.boardInit0"} {
+		ir := mod.NamedFunction(name).String()
+		if !strings.Contains(ir, "@runtime.alloc_noheap") {
+			t.Errorf("%s did not use runtime.alloc_noheap:\n%s", name, ir)
+		}
+		if strings.Contains(ir, "@runtime.alloc(") {
+			t.Errorf("%s unexpectedly used runtime.alloc:\n%s", name, ir)
+		}
+	}
+	for _, name := range []string{"runtime.hwInit1", "runtime.socInit1", "runtime.boardInit1"} {
+		ir := mod.NamedFunction(name).String()
+		if !strings.Contains(ir, "@runtime.alloc(") {
+			t.Errorf("%s did not use runtime.alloc:\n%s", name, ir)
+		}
+		if strings.Contains(ir, "@runtime.alloc_noheap") {
+			t.Errorf("%s unexpectedly used runtime.alloc_noheap:\n%s", name, ir)
+		}
+	}
+}
+
 func assertSingleErrorMsg(t *testing.T, errs []error, want string) {
 	t.Helper()
 	if len(errs) != 1 {
@@ -468,13 +540,23 @@ func compileSyntheticPkg(t *testing.T, pkgPath string, files map[string]string, 
 		rtFile, err := parser.ParseFile(
 			fset,
 			filepath.Join(templatePkg.Dir, "rt.go"),
-			"package runtime\n",
+			`package runtime
+import "unsafe"
+func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer
+func alloc_noheap(size uintptr, layout unsafe.Pointer) unsafe.Pointer
+func trackPointer(ptr, alloca unsafe.Pointer)
+`,
 			0,
 		)
 		if err != nil {
 			t.Fatal(err)
 		}
-		rtInfo := types.Info{}
+		rtInfo := types.Info{
+			Types:      map[ast.Expr]types.TypeAndValue{},
+			Defs:       map[*ast.Ident]types.Object{},
+			Uses:       map[*ast.Ident]types.Object{},
+			Selections: map[*ast.SelectorExpr]*types.Selection{},
+		}
 		rtPkg, err := typeConf.Check(
 			"runtime",
 			fset,
