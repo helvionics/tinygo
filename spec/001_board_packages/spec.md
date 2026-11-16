@@ -176,7 +176,7 @@ All hooks are supplied by a board package through `//go:linkname <local> <target
 - [x] **Task 2:** Protect `interp` against pre-`initAll` hook mutations (with a regression test for a hook-assigned `machine.Serial`-style global) and add transitive `hwInit0` no-heap check
   - **Files:** `compiler/symbol.go`, `interp/interp.go`, `interp/interp_test.go`, `interp/testdata/...`, `transform/noheap_init.go`, `transform/noheap_init_test.go`, `transform/testdata/...`, `transform/optimizer.go`
   - **Verification:** `go test ./compiler/... ./interp/... ./transform/...`
-- [ ] **Task 3:** Resolve relative `linkerscript`, `extra-files`, and `.json` `inherits` paths for external `target.json`, add `"board-package"` (`TargetSpec.BoardPackage`) with automatic `boardpackage` build tag, and auto-import `BoardPackage` into the root package in `loader`
+- [x] **Task 3:** Resolve relative `linkerscript`, `extra-files`, and `.json` `inherits` paths for external `target.json`, add `"board-package"` (`TargetSpec.BoardPackage`) with automatic `boardpackage` build tag, and auto-import `BoardPackage` into the root package in `loader`
   - **Files:** `compileopts/target.go`, `compileopts/config.go`, `compileopts/target_test.go`, `compileopts/testdata/...`, `loader/loader.go`, `loader/loader_test.go`, `builder/build.go`
   - **Verification:** `go test ./compileopts/... ./loader/... ./builder/...`
 - [ ] **Task 4:** Add two-stage `hwInit0`/`hwInit1` boot hooks across `runtime` schedulers (no target sets `socinit` yet, test passes `-tags=socinit`)
