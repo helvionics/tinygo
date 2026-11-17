@@ -179,7 +179,7 @@ All hooks are supplied by a board package through `//go:linkname <local> <target
 - [x] **Task 3:** Resolve relative `linkerscript`, `extra-files`, and `.json` `inherits` paths for external `target.json`, add `"board-package"` (`TargetSpec.BoardPackage`) with automatic `boardpackage` build tag, and auto-import `BoardPackage` into the root package in `loader`
   - **Files:** `compileopts/target.go`, `compileopts/config.go`, `compileopts/target_test.go`, `compileopts/testdata/...`, `loader/loader.go`, `loader/loader_test.go`, `builder/build.go`
   - **Verification:** `go test ./compileopts/... ./loader/... ./builder/...`
-- [ ] **Task 4:** Add two-stage `hwInit0`/`hwInit1` boot hooks across `runtime` schedulers (no target sets `socinit` yet, test passes `-tags=socinit`)
+- [x] **Task 4:** Add two-stage `hwInit0`/`hwInit1` boot hooks across `runtime` schedulers (no target sets `socinit` yet, test passes `-tags=socinit`)
   - **Files:** `src/runtime/hwinit_socinit.go`, `src/runtime/hwinit_nosocinit.go`, `src/runtime/scheduler_cooperative.go`, `src/runtime/scheduler_cores.go`, `src/runtime/scheduler_none.go`, `src/runtime/scheduler_threads.go`, `builder/boothooks_test.go`
   - **Verification:** `go test ./builder/... -run TestBootHooks`
 - [ ] **Task 5:** Migrate in-tree RP2 targets (`rp2040`, `rp2350`, `rp2350b`) to `socinit` and route crystal frequency through `xtalFreqHz()`, no `boardpackage` code yet
