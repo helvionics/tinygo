@@ -161,7 +161,7 @@ All hooks are supplied by a board package through `//go:linkname <local> <target
 * **Zero overhead for unoverridden weak hooks:** Post-link internalization converts surviving `WeakAnyLinkage` functions to `InternalLinkage`, allowing inlining and dead-code elimination of unused hooks.
 * **RAM & IRQ savings under `boardpackage`:** Uninstantiated `UART`, `I2C`, `SPI`, `PWM`, and `RingBuffer` globals are omitted completely, avoiding static `.bss` allocations and unused IRQ vector registrations.
 * **Pre-heap safety:** `hwInit0` is compile-time verified to have zero escaping heap allocations (`runtime.alloc*` unreachable). `NewPWM(slice)` performs pointer arithmetic only with zero allocation. Verified by `transform/noheap_init_test.go` and the Task 7 end-to-end build.
-* **Boot time and flash:** In-tree RP2 boards keep compile-time PLL dividers, so no boot or `.text` change is expected. Task 5 records the before/after `.text` size for `pico` and `pico2` to confirm. Under `boardpackage` the cost is one table entry (dividers for both PLLs) per supported crystal plus a linear scan at boot.
+* **Boot time and flash:** In-tree RP2 boards keep compile-time PLL dividers, so no boot or `.text` overhead is introduced. Task 5 measured `.text` on `./src/examples/blinky1` (`-serial=usb`): `pico` `-opt=z` `8840` -> `8760` B (`-80` B), `pico` `-opt=1` `17544` -> `16968` B (`-576` B), `pico2` `-opt=z` `7704` -> `7624` B (`-80` B), `pico2` `-opt=1` `17128` -> `16744` B (`-384` B). Under `boardpackage` the cost is one table entry (dividers for both PLLs) per supported crystal plus a linear scan at boot.
 * **IRQ latency:** unchanged. No hook runs in interrupt context, and `UART.HandleInterrupt` is the existing handler under an exported name.
 
 ---
@@ -182,7 +182,7 @@ All hooks are supplied by a board package through `//go:linkname <local> <target
 - [x] **Task 4:** Add two-stage `hwInit0`/`hwInit1` boot hooks across `runtime` schedulers (no target sets `socinit` yet, test passes `-tags=socinit`)
   - **Files:** `src/runtime/hwinit_socinit.go`, `src/runtime/hwinit_nosocinit.go`, `src/runtime/scheduler_cooperative.go`, `src/runtime/scheduler_cores.go`, `src/runtime/scheduler_none.go`, `src/runtime/scheduler_threads.go`, `builder/boothooks_test.go`
   - **Verification:** `go test ./builder/... -run TestBootHooks`
-- [ ] **Task 5:** Migrate in-tree RP2 targets (`rp2040`, `rp2350`, `rp2350b`) to `socinit` and route crystal frequency through `xtalFreqHz()`, no `boardpackage` code yet
+- [x] **Task 5:** Migrate in-tree RP2 targets (`rp2040`, `rp2350`, `rp2350b`) to `socinit` and route crystal frequency through `xtalFreqHz()`, no `boardpackage` code yet
   - **Files:** `targets/rp2040.json`, `targets/rp2350.json`, `src/runtime/runtime_rp2.go`, `src/machine/machine_rp2_clocks.go`, `src/machine/machine_rp2_xosc.go`, `src/machine/machine_rp2_2350.go`, `src/machine/machine_rp2_watchdog.go`, `builder/rp2_test.go`
   - **Verification:** `go test ./builder/... -run TestRP2` and `./build/tinygo build` smoke matrix (`pico`, `pico2`, `xiao-rp2040`, `xiao-rp2350` with `-serial=usb` and `-serial=uart`, at `-opt=0`, `-opt=1`, and `-opt=z`), plus recorded `.text` size delta
 - [ ] **Task 6:** Add `boardpackage` mode to `package machine` on RP2 (crystal hook with compile-time PLL table, USB identity and serial hooks, exported `PWM` and `UART.HandleInterrupt`, gated peripheral globals and default pins)
