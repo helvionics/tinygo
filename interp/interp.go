@@ -393,6 +393,8 @@ func (mv *memoryView) markBootHookInst(inst llvm.Value, visited map[llvm.Value]b
 	switch inst.InstructionOpcode() {
 	case llvm.Load:
 		return mv.markReadOnlyPointer(inst.Operand(0))
+	case llvm.ICmp:
+		return nil
 	case llvm.GetElementPtr, llvm.BitCast:
 		if isReadOnlyPtrUseChain(inst, map[llvm.Value]bool{}) {
 			return nil
@@ -488,6 +490,8 @@ func isReadOnlyPtrUseChain(val llvm.Value, seen map[llvm.Value]bool) bool {
 			if user.Operand(0) != val {
 				return false
 			}
+		case llvm.ICmp:
+			// Pointer comparisons (such as nil checks) never mutate or escape the pointee.
 		case llvm.GetElementPtr, llvm.BitCast:
 			if user.Operand(0) != val || !isReadOnlyPtrUseChain(user, seen) {
 				return false
