@@ -62,7 +62,7 @@ Out-of-tree board support splits responsibilities across four layers without alt
    - Compile-time `noheap` enforcement applies `funcNoHeap` by link name to `runtime.hwInit0`, `runtime.socInit0`, and `runtime.boardInit0` (so a board override needs no pragma), and adds a pass after `OptimizeAllocs` (`transform/noheap_init.go`) verifying `runtime.alloc*` is transitively unreachable from `runtime.hwInit0`. The walk follows direct calls and reports any indirect call reachable from `hwInit0` as an error. At `-opt=0` `OptimizeAllocs` does not run, so every allocation in the pre-heap stage is rejected, escaping or not, matching existing `//go:noheap` behavior.
 
 2. **Compile-Time Partial Evaluator (`interp/`):**
-   - `interp.Run` (whole program) marks `runtime.hwInit0` and `runtime.hwInit1` via `r.markExternalLoad` before interpreting `runtime.initAll`.
+   - `interp.Run` (whole program) marks `runtime.hwInit0` and `runtime.hwInit1` via `r.markExternalBootHook` before interpreting `runtime.initAll`.
    - `interp.RunFunc` (per package, runs first, in `builder/build.go` package jobs) marks any `runtime.socInit*`/`runtime.boardInit*` defined in that package module before interpreting `<pkg>.init`.
    - This prevents `interp` from folding `nil` over globals populated at runtime before `initAll()` (such as board peripheral pointers). `RunFunc` sees one package at a time, so it protects only globals of the package that defines the hook. Accepted limitation: hooks may change other packages only through their exported API, and a package `init` must not read its own globals that a hook writes.
 
@@ -188,13 +188,13 @@ All hooks are supplied by a board package through `//go:linkname <local> <target
 - [x] **Task 6:** Add `boardpackage` mode to `package machine` on RP2 (crystal hook with compile-time PLL table, USB identity and serial hooks, exported `PWM` and `UART.HandleInterrupt`, gated peripheral globals and default pins)
   - **Files:** `src/machine/board_clocks.go`, `src/machine/serial-uart.go`, `src/machine/serial-uart-boardpackage.go`, `src/machine/usb.go`, `src/machine/usb_identity_board.go`, `src/machine/usb_identity_boardpackage.go`, `src/machine/machine_rp2*.go`, `src/runtime/runtime_rp2.go`, `builder/rp2_test.go`
   - **Verification:** `go test ./builder/... -run TestRP2` and the Task 5 smoke matrix
-- [ ] **Task 7:** Add out-of-tree `boardpackage` end-to-end integration test suite (external `target.json` using `"board-package"`, linker script, and board module for `rp2040` and `rp2350`, including a `main` that does not explicitly import the board package)
+- [x] **Task 7:** Add out-of-tree `boardpackage` end-to-end integration test suite (external `target.json` using `"board-package"`, linker script, and board module for `rp2040` and `rp2350`, including a `main` that does not explicitly import the board package)
   - **Files:** `builder/build_boardpackage_test.go`, `testdata/boardpackage/...`
   - **Verification:** `go test ./builder/... -run TestBoardPackage`
 
 ### 3.2 Risks & Mitigation
 
-* **Stale `.bss` folding by `interp`:** Mitigated by Task 2 (`markExternalLoad` on `hwInit0`/`hwInit1` and `socInit*`/`boardInit*`), verified with `interp_test.go`. The cross-package gap described in 2.1 is accepted and documented for board authors.
+* **Stale `.bss` folding by `interp`:** Mitigated by Task 2 (`markExternalBootHook` on `hwInit0`/`hwInit1` and `socInit*`/`boardInit*`), verified with `interp_test.go`. The cross-package gap described in 2.1 is accepted and documented for board authors.
 * **Opaque pointer signature mismatch across `//go:linkname`:** Mitigated by checking Go `*types.Signature` in `builder` before freeing `ssa.Program` (Task 1).
 * **Package-level `var` initialization order surprise:** Package `var` initializers and `init()` functions that `interp` cannot fold run in `initAll()`, after all four hooks. They can overwrite state a hook set, and a hook can read a `var` that is not initialized yet. `socInit0()` on RP2 depends on `interp` folding the register pointer vars (`clocks`, `xosc`, `pllSys`, `pllUSB`, `device/rp` peripherals) into static data. Today `machineInit()` runs from `runtime.init()`, after those initializers. The PLL dividers computed by `machine_rp2_clocks.go` `init()` have the same dependency. Mitigation: `TestRP2` asserts no residual `machine.init`/`device/rp.init` store to those globals or to the PLL divider globals at every `-opt` level, and the contract is documented for board authors.
 * **Accidental heap allocation in `boardInit0()`:** Caught at compile time by Task 2 (`funcNoHeap` + `transform/noheap_init.go`) rather than hard-faulting at boot. Indirect calls on that path are rejected, so the check stays sound.
@@ -215,11 +215,11 @@ Resolved by the Approver on 2026-11-15.
 ---
 
 ## Phase 4: Execution & Verification
-- [ ] All per-task verification steps pass.
-- [ ] Linter / vet clean.
-- [ ] Unit tests pass.
-- [ ] Build targets compile.
-- [ ] Neighbor packages unaffected.
+- [x] All per-task verification steps pass.
+- [x] Linter / vet clean.
+- [x] Unit tests pass.
+- [x] Build targets compile.
+- [x] Neighbor packages unaffected.
 - [ ] Approved by the User.
 
 ---
