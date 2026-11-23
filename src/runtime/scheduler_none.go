@@ -21,8 +21,10 @@ var schedulerExit bool
 // run is called by the program entry point to execute the go program.
 // With the "none" scheduler, init and the main function are invoked directly.
 func run() {
+	platformInit0()
 	initRand()
 	initHeap()
+	platformInit1()
 	initAll()
 	callMain()
 	mainExited = true

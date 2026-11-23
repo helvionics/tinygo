@@ -42,6 +42,7 @@ type Program struct {
 	overlay              map[string][]byte
 	sources              map[string][]byte
 	rewritten            map[string]bool
+	importedBoardAlias   bool
 	typecheckConcurrency chan struct{}
 
 	Packages map[string]*Package
@@ -201,68 +202,11 @@ func load(config *compileopts.Config, inputs []string, typeChecker types.Config,
 	}
 
 	// Parse the returned json from `go list`.
-	decoder := json.NewDecoder(buf)
-	var pkgErrors []error
-	for {
-		pkg := &Package{
-			program:      p,
-			FileHashes:   make(map[string][]byte),
-			EmbedGlobals: make(map[string][]*EmbedFile),
-			info: types.Info{
-				Types:      make(map[ast.Expr]types.TypeAndValue),
-				Instances:  make(map[*ast.Ident]types.Instance),
-				Defs:       make(map[*ast.Ident]types.Object),
-				Uses:       make(map[*ast.Ident]types.Object),
-				Implicits:  make(map[ast.Node]types.Object),
-				Scopes:     make(map[ast.Node]*types.Scope),
-				Selections: make(map[*ast.SelectorExpr]*types.Selection),
-			},
-		}
-		err := decoder.Decode(&pkg.PackageJSON)
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil, err
-		}
-		if pkg.Error != nil {
-			// There was an error while importing (for example, a circular
-			// dependency).
-			pos := token.Position{}
-			fields := strings.Split(pkg.Error.Pos, ":")
-			if len(fields) >= 2 {
-				// There is some file/line/column information.
-				if n, err := strconv.Atoi(fields[len(fields)-2]); err == nil {
-					// Format: filename.go:line:column
-					pos.Filename = strings.Join(fields[:len(fields)-2], ":")
-					pos.Line = n
-					pos.Column, _ = strconv.Atoi(fields[len(fields)-1])
-				} else {
-					// Format: filename.go:line
-					pos.Filename = strings.Join(fields[:len(fields)-1], ":")
-					pos.Line, _ = strconv.Atoi(fields[len(fields)-1])
-				}
-				if abs, err := filepath.Abs(pos.Filename); err == nil {
-					// Make the path absolute, so that error messages will be
-					// prettier (it will be turned back into a relative path
-					// when printing the error).
-					pos.Filename = abs
-				}
-				pos.Filename = p.getOriginalPath(pos.Filename)
-			}
-			err := scanner.Error{
-				Pos: pos,
-				Msg: pkg.Error.Err,
-			}
-			if len(pkg.Error.ImportStack) != 0 {
-				pkgErrors = append(pkgErrors, &Error{
-					ImportStack: pkg.Error.ImportStack,
-					Err:         err,
-				})
-				continue
-			}
-			return nil, err
-		}
+	pkgs, pkgErrors, err := p.decodeGoList(buf)
+	if err != nil {
+		return nil, err
+	}
+	for _, pkg := range pkgs {
 		if config.TestConfig.CompileTestBinary && !analysis {
 			// When creating a test binary, `go list` will list two or three
 			// packages used for testing the package. The first is the original
@@ -288,8 +232,8 @@ func load(config *compileopts.Config, inputs []string, typeChecker types.Config,
 				if _, ok := p.Packages[newImportPath]; ok {
 					// Delete the previous package (that this package overrides).
 					delete(p.Packages, newImportPath)
-					for i, pkg := range p.sorted {
-						if pkg.ImportPath == newImportPath {
+					for i, existing := range p.sorted {
+						if existing.ImportPath == newImportPath {
 							p.sorted = append(p.sorted[:i], p.sorted[i+1:]...) // remove element from slice
 							break
 						}
@@ -308,8 +252,161 @@ func load(config *compileopts.Config, inputs []string, typeChecker types.Config,
 		}
 	}
 
+	if err := p.loadBoardPackage(); err != nil {
+		return nil, err
+	}
+
 	p.initRecordedPaths()
 	return p, nil
+}
+
+func (p *Program) decodeGoList(buf *bytes.Buffer) ([]*Package, []error, error) {
+	decoder := json.NewDecoder(buf)
+	var pkgs []*Package
+	var pkgErrors []error
+	for {
+		pkg := &Package{
+			program:      p,
+			FileHashes:   make(map[string][]byte),
+			EmbedGlobals: make(map[string][]*EmbedFile),
+			info: types.Info{
+				Types:      make(map[ast.Expr]types.TypeAndValue),
+				Instances:  make(map[*ast.Ident]types.Instance),
+				Defs:       make(map[*ast.Ident]types.Object),
+				Uses:       make(map[*ast.Ident]types.Object),
+				Implicits:  make(map[ast.Node]types.Object),
+				Scopes:     make(map[ast.Node]*types.Scope),
+				Selections: make(map[*ast.SelectorExpr]*types.Selection),
+			},
+		}
+		err := decoder.Decode(&pkg.PackageJSON)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, nil, err
+		}
+		if pkg.ImportPath == "board" && !p.analysis && p.hasBoardPackage() {
+			p.importedBoardAlias = true
+			continue
+		}
+		if pkg.Error != nil {
+			pos := token.Position{}
+			fields := strings.Split(pkg.Error.Pos, ":")
+			if len(fields) >= 2 {
+				if n, err := strconv.Atoi(fields[len(fields)-2]); err == nil {
+					pos.Filename = strings.Join(fields[:len(fields)-2], ":")
+					pos.Line = n
+					pos.Column, _ = strconv.Atoi(fields[len(fields)-1])
+				} else {
+					pos.Filename = strings.Join(fields[:len(fields)-1], ":")
+					pos.Line, _ = strconv.Atoi(fields[len(fields)-1])
+				}
+				if abs, err := filepath.Abs(pos.Filename); err == nil {
+					pos.Filename = abs
+				}
+				pos.Filename = p.getOriginalPath(pos.Filename)
+			}
+			err := scanner.Error{
+				Pos: pos,
+				Msg: pkg.Error.Err,
+			}
+			if len(pkg.Error.ImportStack) != 0 {
+				pkgErrors = append(pkgErrors, &Error{
+					ImportStack: pkg.Error.ImportStack,
+					Err:         err,
+				})
+				continue
+			}
+			return nil, nil, err
+		}
+		pkgs = append(pkgs, pkg)
+	}
+	return pkgs, pkgErrors, nil
+}
+
+func (p *Program) hasBoardPackage() bool {
+	boardPkg := p.config.Target.BoardPackage
+	return boardPkg != "" && boardPkg != "-"
+}
+
+func (p *Program) boardPackageTarget() string {
+	if p.analysis || p.config.TestConfig.StandardPackage || len(p.sorted) == 0 {
+		return ""
+	}
+	if !p.hasBoardPackage() {
+		return ""
+	}
+	boardPkg := p.config.Target.BoardPackage
+	rootPkg := p.MainPkg()
+	if rootPkg.Name != "main" {
+		return ""
+	}
+	if strings.TrimSuffix(rootPkg.ImportPath, ".test") == boardPkg {
+		return ""
+	}
+	return boardPkg
+}
+
+func (p *Program) loadBoardPackage() error {
+	boardPkg := p.boardPackageTarget()
+	if boardPkg == "" && p.importedBoardAlias && !p.analysis && p.hasBoardPackage() {
+		boardPkg = p.config.Target.BoardPackage
+	}
+	if boardPkg == "" {
+		return nil
+	}
+	if _, ok := p.Packages[boardPkg]; ok {
+		return nil
+	}
+
+	cmd, err := List(p.config, []string{PackageJSONFlag(), "-deps", "-e"}, []string{boardPkg})
+	if err != nil {
+		return err
+	}
+	buf := &bytes.Buffer{}
+	cmd.Stdout = buf
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		return fmt.Errorf("failed to run `go list` for boardpackage %s: %s", boardPkg, err)
+	}
+
+	pkgs, pkgErrors, err := p.decodeGoList(buf)
+	if err != nil {
+		return err
+	}
+	if len(pkgErrors) != 0 {
+		return &Errors{Errs: pkgErrors}
+	}
+
+	var extraSorted []*Package
+	for _, pkg := range pkgs {
+		if _, exists := p.Packages[pkg.ImportPath]; exists {
+			continue
+		}
+		p.Packages[pkg.ImportPath] = pkg
+		extraSorted = append(extraSorted, pkg)
+	}
+	if len(extraSorted) == 0 {
+		return nil
+	}
+
+	insertIdx := len(p.sorted) - 1
+	for i, pkg := range p.sorted {
+		if slices.Contains(pkg.Imports, "board") {
+			insertIdx = i
+			break
+		}
+	}
+	newSorted := make([]*Package, 0, len(p.sorted)+len(extraSorted))
+	newSorted = append(newSorted, p.sorted[:insertIdx]...)
+	newSorted = append(newSorted, extraSorted...)
+	newSorted = append(newSorted, p.sorted[insertIdx:]...)
+	p.sorted = newSorted
+	return nil
 }
 
 // getOriginalPath looks whether this path is in the generated GOROOT and if so,
@@ -398,7 +495,75 @@ func (p *Program) Parse() error {
 		}
 	}
 
+	p.injectBoardPackageImport()
+
 	return p.check()
+}
+
+func (p *Program) injectBoardPackageImport() {
+	boardPkg := p.boardPackageTarget()
+	if boardPkg == "" {
+		return
+	}
+	rootPkg := p.MainPkg()
+	if len(rootPkg.Files) == 0 {
+		return
+	}
+	for _, file := range rootPkg.Files {
+		for _, spec := range file.Imports {
+			if importPath, err := strconv.Unquote(spec.Path.Value); err == nil && (importPath == boardPkg || importPath == "board") {
+				return
+			}
+		}
+	}
+	injectBlankImport(rootPkg.Files[0], boardPkg)
+}
+
+func injectBlankImport(file *ast.File, importPath string) {
+	spec := &ast.ImportSpec{
+		Name: ast.NewIdent("_"),
+		Path: &ast.BasicLit{
+			Kind:  token.STRING,
+			Value: strconv.Quote(importPath),
+		},
+	}
+	file.Imports = append(file.Imports, spec)
+
+	insertAt := 0
+	for i, d := range file.Decls {
+		gen, ok := d.(*ast.GenDecl)
+		if !ok || gen.Tok != token.IMPORT {
+			break
+		}
+		insertAt = i + 1
+		isCgo := false
+		for _, s := range gen.Specs {
+			if ispec, ok := s.(*ast.ImportSpec); ok {
+				if p, err := strconv.Unquote(ispec.Path.Value); err == nil && p == "C" {
+					isCgo = true
+					break
+				}
+			}
+		}
+		if !isCgo {
+			if !gen.Lparen.IsValid() {
+				gen.Lparen = gen.TokPos
+				gen.Rparen = gen.End()
+			}
+			gen.Specs = append(gen.Specs, spec)
+			return
+		}
+	}
+
+	newDecl := &ast.GenDecl{
+		Tok:   token.IMPORT,
+		Specs: []ast.Spec{spec},
+	}
+	decls := make([]ast.Decl, 0, len(file.Decls)+1)
+	decls = append(decls, file.Decls[:insertAt]...)
+	decls = append(decls, newDecl)
+	decls = append(decls, file.Decls[insertAt:]...)
+	file.Decls = decls
 }
 
 func (p *Program) check() error {
@@ -1211,6 +1376,9 @@ func (p *Package) Import(to string) (*types.Package, error) {
 }
 
 func (p *Package) resolveImportPath(to string) string {
+	if to == "board" && !p.program.analysis && p.program.hasBoardPackage() {
+		return p.program.config.Target.BoardPackage
+	}
 	if newTo, ok := p.ImportMap[to]; ok && (p.program.analysis || !strings.HasSuffix(newTo, ".test]")) {
 		return newTo
 	}

@@ -551,6 +551,12 @@ func (c *Config) LibcCFlags() []string {
 	}
 }
 
+// TargetDir returns the canonicalized directory of the leaf target spec
+// when it resides outside $TINYGOROOT/targets, or "" otherwise.
+func (c *Config) TargetDir() string {
+	return c.Target.TargetDir
+}
+
 // LDFlags returns the flags to pass to the linker. A few more flags are needed
 // (like the one for the compiler runtime), but this represents the majority of
 // the flags.
@@ -560,6 +566,9 @@ func (c *Config) LDFlags() []string {
 	var ldflags []string
 	for _, flag := range c.Target.LDFlags {
 		ldflags = append(ldflags, strings.ReplaceAll(flag, "{root}", root))
+	}
+	for _, dir := range c.Target.LinkerSearchDirs {
+		ldflags = append(ldflags, "-L", dir)
 	}
 	ldflags = append(ldflags, "-L", root)
 	if c.Target.LinkerScript != "" {

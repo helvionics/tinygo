@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"slices"
 
 	"github.com/tinygo-org/tinygo/compileopts"
 	"github.com/tinygo-org/tinygo/goenv"
@@ -74,6 +75,10 @@ func NewConfig(options *compileopts.Options) (*compileopts.Config, error) {
 	}
 	if config.PanicUnwind() == "explicit" && config.Scheduler() == "threads" {
 		return nil, errors.New("explicit panic unwinding is not supported with the threads scheduler")
+	}
+	tags := config.BuildTags()
+	if config.Scheduler() == "cores" && slices.Contains(tags, "baremetal") && slices.Contains(tags, "cortexm") && !slices.Contains(tags, "qemu") && slices.Contains(tags, "platformhooks") {
+		return nil, errors.New("scheduler=cores is not supported on baremetal cortexm targets")
 	}
 	return config, nil
 }

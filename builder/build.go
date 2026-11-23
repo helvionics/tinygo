@@ -20,6 +20,7 @@ import (
 	"math/bits"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
@@ -863,18 +864,22 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (*BuildR
 	// Add jobs to compile extra files. These files are in C or assembly and
 	// contain things like the interrupt vector table and low level operations
 	// such as stack switching.
-	for _, path := range config.ExtraFiles() {
-		abspath := filepath.Join(root, path)
+	for _, filePath := range config.ExtraFiles() {
+		abspath, trimPath := extraFilePaths(root, config.TargetDir(), filePath)
 		job := &compileJob{
-			description: "compile extra file " + path,
+			description: "compile extra file " + filePath,
 			run: func(job *compileJob) error {
+				cflags := config.CFlags(false)
 				var compileConfig *cFileCompileConfig
 				if config.TrimPath() {
 					compileConfig = &cFileCompileConfig{
-						recordedPath: config.CSourcePath(filepath.Join("github.com/tinygo-org/tinygo", path)),
+						recordedPath: config.CSourcePath(trimPath),
 					}
+					cflags = append(slices.Clone(cflags),
+						compileopts.FilePrefixMap(filepath.Dir(abspath), config.CSourcePath(path.Dir(trimPath))),
+					)
 				}
-				result, err := compileAndCacheCFile(abspath, tmpdir, config.CFlags(false), compileConfig, config.Options.PrintCommands)
+				result, err := compileAndCacheCFile(abspath, tmpdir, cflags, compileConfig, config.Options.PrintCommands)
 				job.result = result
 				return err
 			},
@@ -2091,4 +2096,26 @@ func gitVCSStamp(dir, modPath string) (version, settings string, gitErr error) {
 	sb.WriteString("build\tvcs.time=" + commitTime.Format(time.RFC3339Nano) + "\n")
 	sb.WriteString("build\tvcs.modified=" + strconv.FormatBool(modified) + "\n")
 	return version, sb.String(), nil
+}
+
+// extraFilePaths resolves the host path and deterministic trimpath for a
+// target extra-files entry.
+func extraFilePaths(root, targetDir, filePath string) (abspath, trimPath string) {
+	if !filepath.IsAbs(filePath) {
+		return filepath.Join(root, filePath), path.Join("github.com/tinygo-org/tinygo", filepath.ToSlash(filePath))
+	}
+	abspath = filePath
+	if targetDir != "" {
+		if rel, err := filepath.Rel(targetDir, abspath); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return abspath, path.Join("target", filepath.ToSlash(rel))
+		}
+	}
+	dirKey := filepath.ToSlash(filepath.Dir(abspath))
+	if targetDir != "" {
+		if relDir, err := filepath.Rel(targetDir, filepath.Dir(abspath)); err == nil {
+			dirKey = filepath.ToSlash(relDir)
+		}
+	}
+	sum := sha256.Sum256([]byte(dirKey))
+	return abspath, path.Join("external", hex.EncodeToString(sum[:4]), filepath.Base(abspath))
 }

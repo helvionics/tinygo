@@ -1,0 +1,4 @@
+{
+    "inherits": ["pkg:example.com/platformhooks/soc/cm33"],
+    "boardpackage": "example.com/platformhooks/board/testboard"
+}

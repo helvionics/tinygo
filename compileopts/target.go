@@ -3,6 +3,7 @@ package compileopts
 // This file loads a target specification from a JSON file.
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"unicode"
 
 	"github.com/tinygo-org/tinygo/goenv"
 )
@@ -76,6 +78,9 @@ type TargetSpec struct {
 	RelocationModel  string   `json:"relocation-model,omitempty"`
 	WITPackage       string   `json:"wit-package,omitempty"`
 	WITWorld         string   `json:"wit-world,omitempty"`
+	BoardPackage     string   `json:"boardpackage,omitempty"`
+	LinkerSearchDirs []string `json:"-"`
+	TargetDir        string   `json:"-"`
 }
 
 // overrideProperties overrides all properties that are set in child into itself using reflection.
@@ -86,6 +91,9 @@ func (spec *TargetSpec) overrideProperties(child *TargetSpec) error {
 
 	for i := 0; i < specType.NumField(); i++ {
 		field := specType.Field(i)
+		if field.Tag.Get("json") == "-" {
+			continue
+		}
 		src := childValue.Field(i)
 		dst := specValue.Field(i)
 
@@ -135,44 +143,339 @@ func (spec *TargetSpec) load(r io.Reader) error {
 	return nil
 }
 
-// loadFromGivenStr loads the TargetSpec from the given string that could be:
-//   - targets/ directory inside the compiler sources
-//   - a relative or absolute path to custom (project specific) target specification .json file;
-//     the Inherits[] could contain the files from target folder (ex. stm32f4disco)
-//     as well as path to custom files (ex. myAwesomeProject.json)
-func (spec *TargetSpec) loadFromGivenStr(str string) error {
-	path := ""
-	if strings.HasSuffix(str, ".json") {
-		path, _ = filepath.Abs(str)
-	} else {
-		path = filepath.Join(goenv.Get("TINYGOROOT"), "targets", strings.ToLower(str)+".json")
+type goModule struct {
+	Path    string        `json:"Path"`
+	Dir     string        `json:"Dir"`
+	Error   *goModuleErr  `json:"Error"`
+	Replace *goModule     `json:"Replace"`
+}
+
+type goModuleErr struct {
+	Err string `json:"Err"`
+}
+
+type targetLoader struct {
+	workDir    string
+	rootDir    string
+	targetsDir string
+	modules    []goModule
+	modulesErr error
+	loadedMods bool
+	visiting   map[string]bool
+}
+
+func newTargetLoader(options *Options) (*targetLoader, error) {
+	workDir := options.Directory
+	if workDir == "" {
+		var err error
+		workDir, err = os.Getwd()
+		if err != nil {
+			return nil, err
+		}
 	}
+	rootDir := canonicalPath(goenv.Get("TINYGOROOT"))
+	targetsDir := canonicalPath(filepath.Join(rootDir, "targets"))
+	return &targetLoader{
+		workDir:    workDir,
+		rootDir:    rootDir,
+		targetsDir: targetsDir,
+		visiting:   make(map[string]bool),
+	}, nil
+}
+
+func canonicalPath(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return filepath.Clean(p)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(resolved)
+}
+
+func isInsideDir(targetPath, baseDir string) bool {
+	rel, err := filepath.Rel(baseDir, targetPath)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+func fileExists(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && !info.IsDir()
+}
+
+func parsePkgTarget(str string) (importPath, fileName string, err error) {
+	body := strings.TrimPrefix(str, "pkg:")
+	if body == "" {
+		return "", "", fmt.Errorf("invalid pkg target %q: empty package path", str)
+	}
+	if strings.Contains(body, `\`) {
+		return "", "", fmt.Errorf("invalid pkg target %q: backslashes are not allowed", str)
+	}
+	if strings.IndexFunc(body, unicode.IsSpace) >= 0 {
+		return "", "", fmt.Errorf("invalid pkg target %q: whitespace is not allowed", str)
+	}
+	if strings.Contains(body, "@") {
+		return "", "", fmt.Errorf("invalid pkg target %q: version suffixes are not allowed", str)
+	}
+	if strings.HasPrefix(body, "/") || strings.HasSuffix(body, "/") {
+		return "", "", fmt.Errorf("invalid pkg target %q: leading or trailing slash is not allowed", str)
+	}
+	segments := strings.Split(body, "/")
+	for _, seg := range segments {
+		if seg == "" || seg == "." || seg == ".." {
+			return "", "", fmt.Errorf("invalid pkg target %q: invalid path segment %q", str, seg)
+		}
+	}
+	if strings.HasSuffix(body, ".json") {
+		idx := strings.LastIndex(body, "/")
+		if idx < 0 {
+			return "", "", fmt.Errorf("invalid pkg target %q: missing package path before json file", str)
+		}
+		importPath = body[:idx]
+		fileName = body[idx+1:]
+		if fileName == ".json" {
+			return "", "", fmt.Errorf("invalid pkg target %q: empty json filename", str)
+		}
+		return importPath, fileName, nil
+	}
+	return body, "target.json", nil
+}
+
+func (l *targetLoader) ensureModules() ([]goModule, error) {
+	if l.loadedMods {
+		return l.modules, l.modulesErr
+	}
+	l.loadedMods = true
+
+	cmd := exec.Command("go", "list", "-m", "-json", "all")
+	cmd.Dir = l.workDir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg != "" {
+			l.modulesErr = fmt.Errorf("go list -m -json all in %s failed: %w: %s", l.workDir, err, msg)
+		} else {
+			l.modulesErr = fmt.Errorf("go list -m -json all in %s failed: %w", l.workDir, err)
+		}
+		return nil, l.modulesErr
+	}
+
+	dec := json.NewDecoder(&stdout)
+	for {
+		var mod goModule
+		if err := dec.Decode(&mod); err != nil {
+			if err == io.EOF {
+				break
+			}
+			l.modulesErr = fmt.Errorf("failed to parse go list -m output in %s: %w", l.workDir, err)
+			return nil, l.modulesErr
+		}
+		l.modules = append(l.modules, mod)
+	}
+	return l.modules, nil
+}
+
+func (l *targetLoader) resolvePkgTarget(str string) (string, error) {
+	importPath, fileName, err := parsePkgTarget(str)
+	if err != nil {
+		return "", err
+	}
+	modules, err := l.ensureModules()
+	if err != nil {
+		return "", fmt.Errorf("resolving %s (in %s): %w", str, l.workDir, err)
+	}
+
+	var best *goModule
+	for i := range modules {
+		m := &modules[i]
+		if importPath == m.Path || strings.HasPrefix(importPath, m.Path+"/") {
+			if best == nil || len(m.Path) > len(best.Path) {
+				best = m
+			}
+		}
+	}
+	if best == nil {
+		return "", fmt.Errorf("target %q: module not found in %s", str, l.workDir)
+	}
+	if best.Error != nil {
+		return "", fmt.Errorf("target %q: %s", str, best.Error.Err)
+	}
+	if best.Replace != nil && best.Replace.Error != nil {
+		return "", fmt.Errorf("target %q: %s", str, best.Replace.Error.Err)
+	}
+	modDir := best.Dir
+	if modDir == "" && best.Replace != nil {
+		modDir = best.Replace.Dir
+	}
+	if modDir == "" {
+		return "", fmt.Errorf("target %q: module %s has no local directory (not downloaded)", str, best.Path)
+	}
+
+	subpath := strings.TrimPrefix(importPath, best.Path)
+	subpath = strings.TrimPrefix(subpath, "/")
+	pkgDir := modDir
+	if subpath != "" {
+		pkgDir = filepath.Join(modDir, filepath.FromSlash(subpath))
+	}
+	if info, err := os.Stat(pkgDir); err != nil || !info.IsDir() {
+		return "", fmt.Errorf("target %q: package directory %s does not exist", str, pkgDir)
+	}
+	targetFile := filepath.Join(pkgDir, fileName)
+	if !fileExists(targetFile) {
+		return "", fmt.Errorf("target %q: target file %s does not exist", str, targetFile)
+	}
+	return canonicalPath(targetFile), nil
+}
+
+func (l *targetLoader) resolveTargetPath(str, baseDir string) (string, error) {
+	if strings.HasPrefix(str, "pkg:") {
+		return l.resolvePkgTarget(str)
+	}
+	if strings.HasSuffix(str, ".json") {
+		if filepath.IsAbs(str) {
+			if !fileExists(str) {
+				return "", fmt.Errorf("target file %s does not exist", str)
+			}
+			return canonicalPath(str), nil
+		}
+		if baseDir != "" {
+			cand := filepath.Join(baseDir, str)
+			if fileExists(cand) {
+				return canonicalPath(cand), nil
+			}
+			fallback := filepath.Join(l.rootDir, str)
+			if fileExists(fallback) {
+				return canonicalPath(fallback), nil
+			}
+			return "", fmt.Errorf("target file %q not found (checked %s and %s)", str, cand, fallback)
+		}
+		cand := filepath.Join(l.workDir, str)
+		if !fileExists(cand) {
+			return "", fmt.Errorf("target file %s does not exist", cand)
+		}
+		return canonicalPath(cand), nil
+	}
+	cand := filepath.Join(l.targetsDir, strings.ToLower(str)+".json")
+	if !fileExists(cand) {
+		return "", fmt.Errorf("target %q not found (%s): %w", str, cand, os.ErrNotExist)
+	}
+	return canonicalPath(cand), nil
+}
+
+func (l *targetLoader) resolveResourcePath(entry, specDir string) (string, error) {
+	if entry == "" {
+		return "", nil
+	}
+	if filepath.IsAbs(entry) {
+		if !fileExists(entry) {
+			return "", fmt.Errorf("file %s does not exist", entry)
+		}
+		return entry, nil
+	}
+	if specDir != "" {
+		cand := filepath.Join(specDir, entry)
+		if fileExists(cand) {
+			canon := canonicalPath(cand)
+			if isInsideDir(canon, l.targetsDir) {
+				rel, err := filepath.Rel(l.rootDir, canon)
+				if err == nil {
+					return filepath.ToSlash(rel), nil
+				}
+			}
+			return canon, nil
+		}
+	}
+	fallback := filepath.Join(l.rootDir, entry)
+	if fileExists(fallback) {
+		return entry, nil
+	}
+	if specDir != "" && isInsideDir(specDir, l.targetsDir) {
+		return entry, nil
+	}
+	if specDir != "" {
+		return "", fmt.Errorf("file %q not found (checked %s and %s)", entry, filepath.Join(specDir, entry), fallback)
+	}
+	return "", fmt.Errorf("file %q not found (checked %s)", entry, fallback)
+}
+
+func (spec *TargetSpec) loadFile(loader *targetLoader, path string) (string, error) {
 	fp, err := os.Open(path)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer fp.Close()
-	return spec.load(fp)
+	if err := spec.load(fp); err != nil {
+		return "", err
+	}
+	specDir := canonicalPath(filepath.Dir(path))
+	if spec.LinkerScript != "" {
+		resolved, err := loader.resolveResourcePath(spec.LinkerScript, specDir)
+		if err != nil {
+			return "", fmt.Errorf("%s: linkerscript: %w", path, err)
+		}
+		spec.LinkerScript = resolved
+	}
+	for i, ef := range spec.ExtraFiles {
+		resolved, err := loader.resolveResourcePath(ef, specDir)
+		if err != nil {
+			return "", fmt.Errorf("%s: extra-files: %w", path, err)
+		}
+		spec.ExtraFiles[i] = resolved
+	}
+	if !isInsideDir(specDir, loader.targetsDir) {
+		spec.TargetDir = specDir
+	}
+	return specDir, nil
 }
 
 // resolveInherits loads inherited targets, recursively.
-func (spec *TargetSpec) resolveInherits() error {
-	// Save InheritableOnly before resolving, since it must not propagate
-	// from parent to child (a board target should not become inheritable-only
-	// just because its parent processor target is).
+func (spec *TargetSpec) resolveInherits(loader *targetLoader, baseDir string) error {
+	// Save InheritableOnly and TargetDir before resolving, since they must not
+	// propagate from parent to child.
 	inheritableOnly := spec.InheritableOnly
+	targetDir := spec.TargetDir
+
+	var searchDirs []string
+	seenDirs := make(map[string]bool)
+	addSearchDir := func(d string) {
+		if d != "" && !seenDirs[d] {
+			seenDirs[d] = true
+			searchDirs = append(searchDirs, d)
+		}
+	}
+	addSearchDir(targetDir)
 
 	// First create a new spec with all the inherited properties.
 	newSpec := &TargetSpec{}
 	for _, name := range spec.Inherits {
-		subtarget := &TargetSpec{}
-		err := subtarget.loadFromGivenStr(name)
+		resolvedPath, err := loader.resolveTargetPath(name, baseDir)
 		if err != nil {
 			return err
 		}
-		err = subtarget.resolveInherits()
+		if loader.visiting[resolvedPath] {
+			return fmt.Errorf("target inheritance cycle: %s", resolvedPath)
+		}
+		loader.visiting[resolvedPath] = true
+		subtarget := &TargetSpec{}
+		subDir, err := subtarget.loadFile(loader, resolvedPath)
+		if err != nil {
+			delete(loader.visiting, resolvedPath)
+			return err
+		}
+		err = subtarget.resolveInherits(loader, subDir)
+		delete(loader.visiting, resolvedPath)
 		if err != nil {
 			return err
+		}
+		for _, d := range subtarget.LinkerSearchDirs {
+			addSearchDir(d)
 		}
 		err = newSpec.overrideProperties(subtarget)
 		if err != nil {
@@ -187,8 +490,10 @@ func (spec *TargetSpec) resolveInherits() error {
 	}
 	*spec = *newSpec
 
-	// Restore InheritableOnly from the original spec, not from parents.
+	// Restore InheritableOnly, TargetDir, and merged LinkerSearchDirs.
 	spec.InheritableOnly = inheritableOnly
+	spec.TargetDir = targetDir
+	spec.LinkerSearchDirs = searchDirs
 
 	return nil
 }
@@ -231,16 +536,25 @@ func loadTarget(options *Options) (*TargetSpec, error) {
 		return defaultTarget(options)
 	}
 
-	// See whether there is a target specification for this target (e.g.
-	// Arduino).
-	spec := &TargetSpec{}
-	err := spec.loadFromGivenStr(options.Target)
+	loader, err := newTargetLoader(options)
 	if err != nil {
 		return nil, err
 	}
-	// Successfully loaded this target from a built-in .json file. Make sure
-	// it includes all parents as specified in the "inherits" key.
-	err = spec.resolveInherits()
+	targetPath, err := loader.resolveTargetPath(options.Target, "")
+	if err != nil {
+		return nil, err
+	}
+	loader.visiting[targetPath] = true
+	spec := &TargetSpec{}
+	specDir, err := spec.loadFile(loader, targetPath)
+	if err != nil {
+		delete(loader.visiting, targetPath)
+		return nil, err
+	}
+	// Successfully loaded this target. Make sure it includes all parents as
+	// specified in the "inherits" key.
+	err = spec.resolveInherits(loader, specDir)
+	delete(loader.visiting, targetPath)
 	if err != nil {
 		return nil, fmt.Errorf("%s : %w", options.Target, err)
 	}

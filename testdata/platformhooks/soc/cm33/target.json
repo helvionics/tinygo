@@ -1,0 +1,8 @@
+{
+    "inherits": ["cortex-m33"],
+    "inheritable-only": true,
+    "build-tags": ["platformhooks", "soc.testcm33"],
+    "scheduler": "tasks",
+    "extra-files": ["vectors.s"],
+    "linkerscript": "soc.ld"
+}
